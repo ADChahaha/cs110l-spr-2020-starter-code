@@ -10,11 +10,29 @@ fn main() {
         println!("Usage: {} <name or pid of target>", args[0]);
         std::process::exit(1);
     }
-    #[allow(unused)] // TODO: delete this line for Milestone 1
     let target = &args[1];
 
     // TODO: Milestone 1: Get the target Process using psutils::get_target()
-    unimplemented!();
+    let target = ps_utils::get_target(target);
+    match target {
+        Ok(target) => match target {
+            Some(target) => {
+                target.print();
+                let child_processes = ps_utils::get_child_processes(target.pid).unwrap();
+                for child in child_processes {
+                    child.print();
+                }
+            }
+            None => {
+                println!("there not being any matching process");
+                std::process::exit(1);
+            }
+        },
+        Err(err) => {
+            println!("The err is {}", err);
+            std::process::exit(1);
+        }
+    }
 }
 
 #[cfg(test)]
