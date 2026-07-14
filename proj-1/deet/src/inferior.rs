@@ -92,17 +92,15 @@ impl Inferior {
         // 执行下一步
         ptrace::step(self.pid(), None)?;
         let status = self.wait(None)?;
-        if let Status::Exited(_) = status {
-            return Ok(status);
+        // 正常执行
+        if let Status::Stopped(Signal::SIGTRAP, _) = status {
+            // restore 0xcc in the breakpoint location
+            self.write_byte(breakpoint_addr, 0xCC)?;
+            ptrace::cont(self.pid(), None)?;
+            return Ok(self.wait(None)?);
         }
-        // 机器指令出错
-        if let Status::Stopped(Signal::SIGTRAP, _) = status{
-            return Ok(status);
-        }
-        // restore 0xcc in the breakpoint location
-        self.write_byte(breakpoint_addr, 0xCC)?;
-        ptrace::cont(self.pid(), None)?;
-        Ok(self.wait(None)?)
+        // 出错
+        Ok(status)
     }
 
     pub fn kill(&mut self) -> Result<(), Box<dyn std::error::Error>> {
