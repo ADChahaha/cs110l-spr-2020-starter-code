@@ -1,5 +1,7 @@
+
 use crate::debugger_command::DebuggerCommand;
-use crate::inferior::Inferior;
+use crate::dwarf_data::{DwarfData, Error as DwarfError};
+use crate::inferior::{Inferior, Status};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
@@ -8,23 +10,40 @@ pub struct Debugger {
     history_path: String,
     readline: Editor<()>,
     inferior: Option<Inferior>,
+    debug_data: DwarfData,
+    breakpoint_cnt: usize,
+    breakpoint_list: Vec<usize>,
 }
 
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
         // TODO (milestone 3): initialize the DwarfData
-
+        let debug_data = match DwarfData::from_file(target) {
+            Ok(val) => val,
+            Err(DwarfError::ErrorOpeningFile) => {
+                println!("Could not open file {}", target);
+                std::process::exit(1);
+            }
+            Err(DwarfError::DwarfFormatError(err)) => {
+                println!("Could not debugging symbols from {}: {:?}", target, err);
+                std::process::exit(1);
+            }
+        };
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
         // Attempt to load history from ~/.deet_history if it exists
         let _ = readline.load_history(&history_path);
 
+        debug_data.print();
         Debugger {
             target: target.to_string(),
             history_path,
             readline,
             inferior: None,
+            debug_data: debug_data,
+            breakpoint_cnt: 0,
+            breakpoint_list: Vec::new(),
         }
     }
 
@@ -32,18 +51,49 @@ impl Debugger {
         loop {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
-                    if let Some(inferior) = Inferior::new(&self.target, &args) {
+                    // 清理之前的内容
+                    if let Some(inferior) = &mut self.inferior {
+                        inferior.kill();
+                        self.breakpoint_cnt = 0;
+                        self.breakpoint_list.clear();
+                    }
+                    // 开始新的程序
+                    if let Some(inferior) =
+                        Inferior::new(&self.target, &args)
+                    {
                         // Create the inferior
                         self.inferior = Some(inferior);
                         // TODO (milestone 1): make the inferior run
                         // You may use self.inferior.as_mut().unwrap() to get a mutable reference
                         // to the Inferior object
+                        self.inferior.as_mut().unwrap().set_breakpoint(&self.breakpoint_list);
+                        self.handle_cont();
                     } else {
                         println!("Error starting subprocess");
                     }
                 }
                 DebuggerCommand::Quit => {
+                    if let Some(inferior) = &mut self.inferior {
+                        inferior.kill();
+                    }
                     return;
+                }
+                DebuggerCommand::Continue => {
+                    self.handle_cont();
+                }
+                DebuggerCommand::BackTrace => {
+                    self.inferior
+                        .as_mut()
+                        .unwrap()
+                        .print_backtrace(&self.debug_data);
+                }
+                DebuggerCommand::Break(addr) => {
+                    println!("Set breakpoint {} at {}", self.breakpoint_cnt, addr);
+                    self.breakpoint_cnt += 1;
+                    self.breakpoint_list.push(addr);
+                    if let Some(inferior) = &mut self.inferior{
+                        inferior.set_breakpoint(&self.breakpoint_list);
+                    }
                 }
             }
         }
@@ -80,13 +130,41 @@ impl Debugger {
                         );
                     }
                     let tokens: Vec<&str> = line.split_whitespace().collect();
-                    if let Some(cmd) = DebuggerCommand::from_tokens(&tokens) {
+                    if let Some(cmd) = DebuggerCommand::from_tokens(&tokens, &self.debug_data) {
                         return cmd;
                     } else {
                         println!("Unrecognized command.");
                     }
                 }
             }
+        }
+    }
+    fn handle_cont(&mut self) -> Result<(), String> {
+        if let Some(inferior) = self.inferior.as_mut() {
+            // 处理返回结果
+            match inferior.continue_exec() {
+                Ok(status) => match status {
+                    Status::Exited(code) => {
+                        println!("Child exited (status {})", code);
+                    }
+                    Status::Stopped(signal, rip) => {
+                        println!("Child stopped (signal {})", signal);
+                        let line = self.debug_data.get_line_from_addr(rip);
+                        if let Some(line) = line {
+                            println!("Stopped at {}:{}", line.file, line.number);
+                        }
+                    }
+                    Status::Signaled(signal) => {
+                        println!("signal: {}", signal)
+                    }
+                },
+                Err(err) => {
+                    println!("{}", err);
+                }
+            };
+            Ok(())
+        } else {
+            Err("Inferior is None!".to_string())
         }
     }
 }
