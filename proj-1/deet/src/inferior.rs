@@ -124,6 +124,9 @@ impl Inferior {
 
     pub fn set_breakpoint(&mut self, breakpoint_list: &Vec<usize>) -> Result<(), nix::Error> {
         for breakpoint in breakpoint_list {
+            if self.breakpoints.contains_key(breakpoint){
+                continue;
+            }
             let orig_byte = self.write_byte(*breakpoint, 0xCC)?;
             self.breakpoints.insert(
                 *breakpoint,
