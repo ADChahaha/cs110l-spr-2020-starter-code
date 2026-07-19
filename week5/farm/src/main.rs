@@ -72,11 +72,36 @@ fn main() {
     let start = Instant::now();
 
     // TODO: call get_input_numbers() and store a queue of numbers to factor
+    let numbers = Arc::new(Mutex::new(get_input_numbers()));
+    let mut threads = Vec::new();
 
     // TODO: spawn `num_threads` threads, each of which pops numbers off the queue and calls
     // factor_number() until the queue is empty
+    for _ in 0..num_threads {
+        let numbers_ref = numbers.clone();
+        threads.push(thread::spawn(move || {
+            let number;
+            {
+                let guard = numbers_ref.lock();
+                match guard {
+                    Ok(mut guard) => match guard.pop_back() {
+                        Some(value) => {
+                            number = value;
+                        }
+                        None => return,
+                    },
+                    Err(_) => {
+                        return;
+                    }
+                }
+            }
+            factor_number(number);
+        }));
+    }
 
     // TODO: join all the threads you created
-
+    for handle in threads {
+        handle.join();
+    }
     println!("Total execution time: {:?}", start.elapsed());
 }
