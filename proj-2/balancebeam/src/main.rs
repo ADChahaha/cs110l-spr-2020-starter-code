@@ -142,7 +142,8 @@ async fn main() -> io::Result<()> {
     let state_ref = Arc::new(RwLock::new(state));
     // check healthy interval Future
     let state_ref_copy = state_ref.clone();
-    let request_times: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+    let request_times: Arc<Mutex<HashMap<String, (usize, std::time::Instant)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     tokio::spawn(async move {
         loop {
             let active_health_check_interval =
@@ -231,11 +232,11 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
 async fn handle_connection(
     mut client_conn: TcpStream,
     state: Arc<RwLock<ProxyState>>,
-    request_times: Arc<Mutex<HashMap<String, usize>>>,
+    request_times: Arc<Mutex<HashMap<String, (usize, std::time::Instant)>>>,
 ) {
-    let mut started = Instant::now();
     let max_requests_per_minute = { state.read().unwrap().max_requests_per_minute };
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
+
     log::info!("Connection received from {}", client_ip);
 
     // Open a connection to a random destination server
@@ -248,6 +249,12 @@ async fn handle_connection(
         }
     };
     let upstream_ip: String = client_conn.peer_addr().unwrap().ip().to_string();
+    {
+        let mut lock = request_times.lock().unwrap();
+        *lock
+            .entry(upstream_ip.clone())
+            .or_insert((0, std::time::Instant::now()));
+    }
     // The client may now send us one or more requests. Keep trying to read requests until the
     // client hangs up or we get an error.
     loop {
@@ -280,14 +287,17 @@ async fn handle_connection(
         };
 
         let restrict_flag = {
-            let request_times = &mut request_times.lock().unwrap();
+            let lock = &mut request_times.lock().unwrap();
+            let (request_times, mut started) = &mut *lock.get_mut(&upstream_ip).unwrap();
+
             if started.elapsed() > std::time::Duration::from_secs(60) {
-                *request_times.entry(upstream_ip.clone()).or_insert(0) = 0;
+                *request_times += 1;
+                *request_times = 0;
                 started = Instant::now();
             }
-            *request_times.entry(upstream_ip.clone()).or_insert(0) += 1;
+            *request_times += 1;
             if max_requests_per_minute != 0 {
-                request_times[&upstream_ip] > max_requests_per_minute
+                *request_times > max_requests_per_minute
             } else {
                 false
             }
