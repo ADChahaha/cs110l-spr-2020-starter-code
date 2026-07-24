@@ -3,6 +3,7 @@ mod response;
 
 use clap::Clap;
 use core::fmt;
+use log::log;
 use rand::seq::IteratorRandom;
 use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
@@ -138,6 +139,38 @@ async fn main() -> io::Result<()> {
         max_requests_per_minute: options.max_requests_per_minute,
     };
     let state_ref = Arc::new(RwLock::new(state));
+    // check healthy interval Future
+    let state_ref_copy = state_ref.clone();
+    tokio::spawn(async move {
+        loop {
+            let active_health_check_interval =
+                { state_ref_copy.read().unwrap().active_health_check_interval };
+            // delay for interval
+            tokio::time::delay_for(tokio::time::Duration::from_secs(
+                active_health_check_interval as u64,
+            ))
+            .await;
+            // check every upstream
+            let (active_health_check_path, upstream_addresses) = {
+                let lock = state_ref_copy.read().unwrap();
+                (
+                    lock.active_health_check_path.clone(),
+                    lock.upstream.addresses.clone(),
+                )
+            };
+            for (index, addr) in upstream_addresses.iter().enumerate() {
+                // check
+                let health_check_result =
+                    request::health_check(&addr, &active_health_check_path).await;
+                let upstream = { &mut state_ref_copy.write().unwrap().upstream };
+                if health_check_result == true {
+                    upstream.set_valid(index, true);
+                } else {
+                    upstream.set_valid(index, false);
+                }
+            }
+        }
+    });
     loop {
         let (stream, _) = listener.accept().await?;
         let state_ref = state_ref.clone();

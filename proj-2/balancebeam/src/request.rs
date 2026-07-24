@@ -1,6 +1,6 @@
 use std::cmp::min;
-use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 const MAX_HEADERS_SIZE: usize = 8000;
 const MAX_BODY_SIZE: usize = 10000000;
@@ -77,7 +77,9 @@ pub fn extend_header_value(
 fn parse_request(buffer: &[u8]) -> Result<Option<(http::Request<Vec<u8>>, usize)>, Error> {
     let mut headers = [httparse::EMPTY_HEADER; MAX_NUM_HEADERS];
     let mut req = httparse::Request::new(&mut headers);
-    let res = req.parse(buffer).or_else(|err| Err(Error::MalformedRequest(err)))?;
+    let res = req
+        .parse(buffer)
+        .or_else(|err| Err(Error::MalformedRequest(err)))?;
 
     if let httparse::Status::Complete(len) = res {
         let mut request = http::Request::builder()
@@ -110,7 +112,8 @@ async fn read_headers(stream: &mut TcpStream) -> Result<http::Request<Vec<u8>>, 
     loop {
         // Read bytes from the connection into the buffer, starting at position bytes_read
         let new_bytes = stream
-            .read(&mut request_buffer[bytes_read..]).await
+            .read(&mut request_buffer[bytes_read..])
+            .await
             .or_else(|err| Err(Error::ConnectionError(err)))?;
         if new_bytes == 0 {
             // We didn't manage to read a complete request
@@ -147,7 +150,10 @@ async fn read_body(
         // Read up to 512 bytes at a time. (If the client only sent a small body, then only allocate
         // space to read that body.)
         let mut buffer = vec![0_u8; min(512, content_length)];
-        let bytes_read = stream.read(&mut buffer).await.or_else(|err| Err(Error::ConnectionError(err)))?;
+        let bytes_read = stream
+            .read(&mut buffer)
+            .await
+            .or_else(|err| Err(Error::ConnectionError(err)))?;
 
         // Make sure the client is still sending us bytes
         if bytes_read == 0 {
@@ -199,10 +205,14 @@ pub async fn write_to_stream(
     request: &http::Request<Vec<u8>>,
     stream: &mut TcpStream,
 ) -> Result<(), std::io::Error> {
-    stream.write(&format_request_line(request).into_bytes()).await?;
+    stream
+        .write(&format_request_line(request).into_bytes())
+        .await?;
     stream.write(&['\r' as u8, '\n' as u8]).await?; // \r\n
     for (header_name, header_value) in request.headers() {
-        stream.write(&format!("{}: ", header_name).as_bytes()).await?;
+        stream
+            .write(&format!("{}: ", header_name).as_bytes())
+            .await?;
         stream.write(header_value.as_bytes()).await?;
         stream.write(&['\r' as u8, '\n' as u8]).await?; // \r\n
     }
@@ -214,5 +224,35 @@ pub async fn write_to_stream(
 }
 
 pub fn format_request_line(request: &http::Request<Vec<u8>>) -> String {
-    format!("{} {} {:?}", request.method(), request.uri(), request.version())
+    format!(
+        "{} {} {:?}",
+        request.method(),
+        request.uri(),
+        request.version()
+    )
+}
+
+pub async fn health_check(addr: &String, path: &String) -> bool {
+    let mut stream = match TcpStream::connect(addr).await {
+        Ok(stream) => stream,
+        Err(_) => return false,
+    };
+
+    let request = http::Request::builder()
+        .method(http::Method::GET)
+        .uri(path.as_str())
+        .version(http::Version::HTTP_11)
+        .header("Host", addr.as_str())
+        .header("Connection", "close")
+        .body(Vec::new())
+        .unwrap();
+
+    if write_to_stream(&request, &mut stream).await.is_err() {
+        return false;
+    }
+
+    match crate::response::read_from_stream(&mut stream, request.method()).await {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    }
 }
