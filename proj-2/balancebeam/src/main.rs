@@ -2,13 +2,14 @@ mod request;
 mod response;
 
 use clap::Clap;
-use core::fmt;
+use core::{fmt, time};
 use log::log;
 use rand::seq::IteratorRandom;
 use rand::{Rng, SeedableRng};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 use tokio::net::{TcpListener, TcpStream};
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
@@ -141,6 +142,7 @@ async fn main() -> io::Result<()> {
     let state_ref = Arc::new(RwLock::new(state));
     // check healthy interval Future
     let state_ref_copy = state_ref.clone();
+    let request_times: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
     tokio::spawn(async move {
         loop {
             let active_health_check_interval =
@@ -174,8 +176,9 @@ async fn main() -> io::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let state_ref = state_ref.clone();
+        let request_times = request_times.clone();
         tokio::spawn(async move {
-            handle_connection(stream, state_ref).await;
+            handle_connection(stream, state_ref, request_times).await;
         });
     }
 }
@@ -225,7 +228,13 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
     }
 }
 
-async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxyState>>) {
+async fn handle_connection(
+    mut client_conn: TcpStream,
+    state: Arc<RwLock<ProxyState>>,
+    request_times: Arc<Mutex<HashMap<String, usize>>>,
+) {
+    let mut started = Instant::now();
+    let max_requests_per_minute = { state.read().unwrap().max_requests_per_minute };
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
 
@@ -238,8 +247,7 @@ async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxySt
             return;
         }
     };
-    let upstream_ip = client_conn.peer_addr().unwrap().ip().to_string();
-
+    let upstream_ip: String = client_conn.peer_addr().unwrap().ip().to_string();
     // The client may now send us one or more requests. Keep trying to read requests until the
     // client hangs up or we get an error.
     loop {
@@ -270,6 +278,25 @@ async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxySt
                 continue;
             }
         };
+
+        let restrict_flag = {
+            let request_times = &mut request_times.lock().unwrap();
+            if started.elapsed() > std::time::Duration::from_secs(60) {
+                *request_times.entry(upstream_ip.clone()).or_insert(0) = 0;
+                started = Instant::now();
+            }
+            *request_times.entry(upstream_ip.clone()).or_insert(0) += 1;
+            if max_requests_per_minute != 0 {
+                request_times[&upstream_ip] > max_requests_per_minute
+            } else {
+                false
+            }
+        };
+        if restrict_flag {
+            let response = response::make_http_error(http::StatusCode::TOO_MANY_REQUESTS);
+            response::write_to_stream(&response, &mut client_conn).await;
+            continue;
+        }
         log::info!(
             "{} -> {}: {}",
             client_ip,
@@ -281,7 +308,6 @@ async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxySt
         // (We're the ones connecting directly to the upstream server, so without this header, the
         // upstream server will only know our IP, not the client's.)
         request::extend_header_value(&mut request, "x-forwarded-for", &client_ip);
-
         // Forward the request to the server
         if let Err(error) = request::write_to_stream(&request, &mut upstream_conn).await {
             log::error!(
